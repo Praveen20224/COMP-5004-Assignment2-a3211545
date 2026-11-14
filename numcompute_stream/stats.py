@@ -208,3 +208,95 @@ class Welford:
 
 
 StreamingStats = Welford
+
+class RunningStats:
+    """Running mean and variance for every column of a table, one chunk at a time.
+    Attributes:
+        n_features: number of columns, None until the first non-empty chunk
+        count: int array, how many numbers were used for each column
+        mean: float array, NaN for a column that has no numbers yet
+    """
+
+    def __init__(self, nan_policy='omit'):
+        if nan_policy not in ('omit', 'raise'):
+            raise ValueError("nan_policy must be 'omit' or 'raise'")
+        self.nan_policy = nan_policy
+        self.reset()
+
+    def reset(self):
+        """Forget everything. Returns self."""
+        self.n_features = None
+        self.count = np.zeros(0, dtype=np.int64)
+        self._mean = np.zeros(0)
+        self._m2 = np.zeros(0)
+        return self
+
+    def update(self, X_chunk):
+        """Add a chunk. Returns self so calls can be chained.
+
+        Params:
+            X_chunk: numbers, shape (n_rows, n_features). A 1-D input is one
+                     column of n_rows values, a single number is one value.
+                     Empty chunks are ignored.
+
+        Raises:
+            TypeError: if X_chunk is not numeric
+            ValueError: if X_chunk has more than 2 dimensions or no columns, contains inf,
+                        contains NaN with nan_policy='raise', or has a different
+                        number of columns than the earlier chunks
+            If a chunk is rejected, nothing is changed.
+        """
+        X = np.asarray(X_chunk)
+        if X.dtype.kind not in 'biuf':
+            raise TypeError('chunk must contain real numbers')
+        X = X.astype(float)
+        if X.ndim > 2:
+            raise ValueError('chunk must be a number, 1-D or 2-D, got shape ' + str(X.shape))
+        if X.ndim == 2 and X.shape[1] == 0:
+            raise ValueError('chunk must have at least one column')
+        X = X.reshape(-1, X.shape[-1] if X.ndim == 2 else 1)
+        if X.shape[0] == 0:
+            return self                                    # an empty chunk changes nothing
+        if np.isinf(X).any():
+            raise ValueError('chunk must not contain infinity')
+        valid = ~np.isnan(X)
+        if self.nan_policy == 'raise' and not valid.all():
+            raise ValueError('chunk contains NaN')
+        if self.n_features is not None and X.shape[1] != self.n_features:
+            raise ValueError(f'chunk has {X.shape[1]} columns but earlier chunks had {self.n_features}')
+
+        d = X.shape[1]
+        if self.n_features is None:
+            self.n_features = d
+            self.count, self._mean, self._m2 = np.zeros(d, dtype=np.int64), np.zeros(d), np.zeros(d)
+
+        # summary of this chunk alone, per column (NaN is left out)
+        n_b = valid.sum(axis=0)
+        mean_b = np.divide(np.where(valid, X, 0.0).sum(axis=0), n_b, out=np.zeros(d), where=n_b > 0)
+        m2_b = (np.where(valid, X - mean_b, 0.0) ** 2).sum(axis=0)
+
+        # merge it into the running totals
+        total = self.count + n_b
+        share = np.divide(n_b, total, out=np.zeros(d), where=total > 0)   # n_b / total
+        delta = mean_b - self._mean
+        self._m2 = self._m2 + m2_b + delta ** 2 * self.count * share
+        self._mean = self._mean + delta * share
+        self.count = total
+        return self
+
+    update_stats = update
+
+    @property
+    def mean(self):
+        """Mean of each column, NaN where no number was seen yet."""
+        return np.where(self.count > 0, self._mean, np.nan)
+
+    def variance(self, ddof=0):
+        """Variance of each column, divided by (count - ddof). NaN when count <= ddof."""
+        _check_ddof(ddof)
+        divisor = self.count - ddof
+        return np.divide(self._m2, divisor, out=np.full(self.count.shape, np.nan), where=divisor > 0)
+
+    def std(self, ddof=0):
+        """Standard deviation of each column, same ddof rules as variance()."""
+        return np.sqrt(self.variance(ddof))
