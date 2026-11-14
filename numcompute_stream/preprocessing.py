@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from numcompute_stream.stats import RunningStats
+
 __all__ = [
     "NotFittedError",
     "StandardScaler",
@@ -182,6 +184,42 @@ class StandardScaler(_BaseTransformer):
         self.mean_ = mean
         self.scale_ = np.where(constant, 1.0, std)
         self.n_features_in_ = X.shape[1]
+        self._stats = None  # forget any stream, a later partial_fit starts a new one
+        return self
+
+    def partial_fit(self, X_chunk):
+        """
+        Update mean and std with one more chunk, without keeping the old chunks.
+
+        Params: X_chunk: array shape (n_samples, n_features), numeric
+
+        Returns: self: the scaler, ready to transform after every chunk
+
+        Raises:
+            ValueError: if X_chunk is not 2D, has inf, or has a different number of
+                        features than the earlier chunks (nothing is changed then)
+            TypeError: if X_chunk is not numeric
+        """
+        X = _check_numeric_2d(X_chunk, name="X_chunk")
+        if X.shape[0] == 0:
+            return self  # nothing to learn from an empty chunk
+
+        stats = getattr(self, "_stats", None)
+        if stats is None:  #To check if this is the first chunk of a new stream, if yes set stats and low
+            stats = RunningStats()
+            low = np.full(X.shape[1], np.inf)
+        else:
+            low = self._low
+        stats.update(X)  # Setting up staistiscs for this new chunk.
+        self._stats = stats
+        self._low = np.fmin(low, np.fmin.reduce(X, axis=0))  #choses the smallest value per column, NaN ignored
+
+        mean = stats.mean
+        std = stats.std()
+        constant = std <= 10 * _EPS * np.abs(mean)  # same rule applied as described for fit
+        self.mean_ = np.where(constant, self._low, mean)
+        self.scale_ = np.where(constant | np.isnan(std), 1.0, std)
+        self.n_features_in_ = stats.n_features
         return self
 
     def transform(self, X):
