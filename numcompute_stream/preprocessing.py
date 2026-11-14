@@ -305,6 +305,43 @@ class MinMaxScaler(_BaseTransformer):
         self.data_max_ = np.nanmax(X, axis=0)
         self.data_range_ = self.data_max_ - self.data_min_
         self.n_features_in_ = X.shape[1]
+        self._streaming = False
+        return self
+
+    def partial_fit(self, X_chunk):
+        """
+        Update the lowest and highest value per column with one more chunk.
+
+        Params:
+            X_chunk: array shape (n_samples, n_features), 
+
+        Returns:
+            self
+
+        Raises:
+            ValueError: if X_chunk is not 2D, has inf, or has a different number of
+                        features than the earlier chunks (nothing is changed then)
+            TypeError: if X_chunk is not numeric
+
+        Time: O(n_samples * n_features)
+        Space: O(n_features)
+        """
+        X = _check_numeric_2d(X_chunk, name="X_chunk")
+        if X.shape[0] == 0:
+            return self
+
+        low = np.fmin.reduce(X, axis=0)
+        high = np.fmax.reduce(X, axis=0)
+        if getattr(self, "_streaming", False):
+            _check_n_features(X, self.n_features_in_)
+            low = np.fmin(self.data_min_, low)
+            high = np.fmax(self.data_max_, high)
+
+        self.data_min_ = low
+        self.data_max_ = high
+        self.data_range_ = high - low
+        self.n_features_in_ = X.shape[1]
+        self._streaming = True
         return self
 
     def transform(self, X):
@@ -395,6 +432,39 @@ class SimpleImputer(_BaseTransformer):
             stats = np.nanmean(X, axis=0)
         self.statistics_ = stats
         self.n_features_in_ = n_features
+        self._stats = None  # forget any stream, a later partial_fit starts a new one
+        return self
+
+    def partial_fit(self, X_chunk):
+        """
+        Update the replacement values with one more chunk.
+
+        Params:
+            X_chunk: array shape (n_samples, n_features), numeric, can have NaN.
+                     An empty chunk (0 rows) is ignored.
+
+        Returns: self
+
+        Raises:
+            ValueError: if X_chunk is not 2D, has inf, or has a different number of
+                        columns than the earlier chunks (nothing is changed then)
+            TypeError: if X_chunk is not numeric
+        """
+        X = _check_numeric_2d(X_chunk, name="X_chunk")
+        if X.shape[0] == 0:
+            return self
+
+        stats = getattr(self, "_stats", None)
+        if stats is None:
+            stats = RunningStats()
+        stats.update(X)
+        self._stats = stats
+
+        if self.strategy == "constant":
+            self.statistics_ = np.full(stats.n_features, self.fill_value)
+        else:  # mean, and fill_value for a column that has no number yet
+            self.statistics_ = np.where(stats.count > 0, stats.mean, self.fill_value)
+        self.n_features_in_ = stats.n_features
         return self
 
     def transform(self, X):
@@ -526,6 +596,52 @@ class OneHotEncoder(_BaseTransformer):
         self._family = family
         self.n_features_in_ = f
         self.n_features_out_ = int(pair_keys.size)
+        # --- NEW (streaming) ---
+        self._streaming = False  # forget any stream, a later partial_fit starts a new one
+        return self
+
+    def partial_fit(self, X_chunk):
+        """
+        Add the categories of one more chunk to the ones learned so far.
+
+        Params: X_chunk: array shape (n_samples, n_features)
+
+        Returns: self
+
+        Raises:
+            ValueError: if X_chunk is not 2D, has NaN, or has a different number of
+                        features than the earlier chunks (nothing is changed then)
+            TypeError: if X_chunk is not numeric or string, or is a different kind
+                       (numbers or strings) than the earlier chunks
+        """
+        arr, family = self._check_categorical_2d(X_chunk)
+        if arr.shape[0] == 0:
+            return self
+        flat, feature = self._flatten(arr)
+
+        if getattr(self, "_streaming", False):  # a stream is already running
+            if family != self._family:
+                raise TypeError(
+                    f"X holds {family} values but the encoder was fitted on "
+                    f"{self._family} values"
+                )
+            _check_n_features(arr, self.n_features_in_)
+            # put the categories learned so far back in, so none of them is lost
+            n_old = self._values.size
+            flat = np.concatenate([self._values[self._pair_keys % n_old], flat])
+            feature = np.concatenate([self._pair_keys // n_old, feature])
+
+        values, codes = np.unique(flat, return_inverse=True)
+        n_values = values.size
+        pair_keys = np.unique(feature * n_values + codes)
+        counts = np.bincount(pair_keys // n_values, minlength=arr.shape[1])
+        self.categories_ = np.split(values[pair_keys % n_values], np.cumsum(counts)[:-1])
+        self._values = values
+        self._pair_keys = pair_keys
+        self._family = family
+        self.n_features_in_ = arr.shape[1]
+        self.n_features_out_ = int(pair_keys.size)
+        self._streaming = True
         return self
 
     def transform(self, X):
