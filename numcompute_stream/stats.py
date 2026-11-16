@@ -286,7 +286,9 @@ class RunningStats:
         self.count = total
         return self
 
-    update_stats = update         
+    update_stats = update          
+
+    @property    
     def mean(self):
         """Mean of each column, NaN where no number was seen yet."""
         return np.where(self.count > 0, self._mean, np.nan)
