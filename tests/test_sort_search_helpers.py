@@ -39,13 +39,14 @@ def test_as_1d_rejects_invalid_dimensions(value):
         _as_1d(value)
 
 
-# Despite its name, allow_zero controls the upper bound; both modes accept zero.
+# allow_n controls the upper bound: True accepts k == n, False needs k < n.
+# Both modes accept zero.
 @pytest.mark.parametrize(
-    "allow_zero", [True, False], ids=["inclusive-upper-bound", "exclusive-upper-bound"]
+    "allow_n", [True, False], ids=["inclusive-upper-bound", "exclusive-upper-bound"]
 )
 @pytest.mark.parametrize("k", [0, 1, 4])
-def test_check_k_accepts_python_integers_in_both_modes(k, allow_zero):
-    result = _check_k(k, n=5, allow_zero=allow_zero)
+def test_check_k_accepts_python_integers_in_both_modes(k, allow_n):
+    result = _check_k(k, n=5, allow_n=allow_n)
 
     assert result == k
     assert type(result) is int
@@ -56,11 +57,11 @@ def test_check_k_default_mode_includes_n():
 
 
 def test_check_k_inclusive_mode_accepts_n():
-    assert _check_k(5, n=5, allow_zero=True) == 5
+    assert _check_k(5, n=5, allow_n=True) == 5
 
 
 @pytest.mark.parametrize(
-    "allow_zero, k",
+    "allow_n, k",
     [
         pytest.param(True, -1, id="inclusive-negative"),
         pytest.param(True, 6, id="inclusive-above-n"),
@@ -69,24 +70,32 @@ def test_check_k_inclusive_mode_accepts_n():
         pytest.param(False, 6, id="exclusive-above-n"),
     ],
 )
-def test_check_k_rejects_out_of_range_values(allow_zero, k):
+def test_check_k_rejects_out_of_range_values(allow_n, k):
     with pytest.raises(ValueError):
-        _check_k(k, n=5, allow_zero=allow_zero)
+        _check_k(k, n=5, allow_n=allow_n)
+
+
+@pytest.mark.parametrize("k", [np.int64(2), np.int32(2), np.uint8(2)])
+def test_check_k_accepts_numpy_integers_and_returns_a_python_int(k):
+    result = _check_k(k, n=5)
+
+    assert result == 2
+    assert type(result) is int
 
 
 @pytest.mark.parametrize(
     "k",
     [
-        pytest.param(np.int64(2), id="numpy-int64"),
         pytest.param(2.5, id="fractional-float"),
         pytest.param(2.0, id="integral-float"),
         pytest.param("2", id="numeric-string"),
         pytest.param(True, id="boolean-true"),
         pytest.param(False, id="boolean-false"),
+        pytest.param(np.bool_(True), id="numpy-boolean"),
     ],
 )
-def test_check_k_requires_exact_python_int(k):
-    """The implementation rejects NumPy integers and bool (an int subclass)."""
+def test_check_k_rejects_floats_strings_and_booleans(k):
+    """Integer-like values are accepted, but floats, strings and bool are not."""
     with pytest.raises(TypeError):
         _check_k(k, n=5)
 
@@ -105,16 +114,24 @@ def test_check_axis_rejects_out_of_range_axes(axis):
         _check_axis(axis, ndim=3)
 
 
+@pytest.mark.parametrize("axis, expected", [(np.int64(1), 1), (np.int32(-1), 2)])
+def test_check_axis_accepts_numpy_integers_and_returns_a_python_int(axis, expected):
+    result = _check_axis(axis, ndim=3)
+
+    assert result == expected
+    assert type(result) is int
+
+
 @pytest.mark.parametrize(
     "axis",
     [
-        pytest.param(np.int64(1), id="numpy-int64"),
         pytest.param(1.0, id="float"),
         pytest.param("1", id="string"),
         pytest.param(True, id="boolean"),
+        pytest.param(np.bool_(True), id="numpy-boolean"),
         pytest.param(None, id="none"),
     ],
 )
-def test_check_axis_rejects_non_python_int_types(axis):
+def test_check_axis_rejects_non_integer_types(axis):
     with pytest.raises(TypeError):
         _check_axis(axis, ndim=3)
