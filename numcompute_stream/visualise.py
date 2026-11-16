@@ -66,7 +66,7 @@ def compare_models(metric1, metric2, labels, title="Model comparison", ylabel="M
     ax.plot(np.arange(first.size), first, color=_BLUE, linewidth=2, label=str(labels[0]))
     ax.plot(np.arange(second.size), second, color=_ORANGE, linewidth=2, linestyle="--",label=str(labels[1]))                          # dashed too, so colour is not the only clue
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-    ax.legend(frameon=False, labelcolor=_INK)
+    ax.legend(frameon=False, labelcolor=_INK, loc="upper center", bbox_to_anchor=(0.5, -0.18), ncol=2)
     return _finish(fig, save_path, show)
 
 
