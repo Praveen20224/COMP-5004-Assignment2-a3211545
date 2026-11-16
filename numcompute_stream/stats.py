@@ -12,7 +12,8 @@ import warnings
 import numpy as np
 
 __all__ = ['mean', 'median', 'var', 'variance', 'std', 'min', 'max',
-           'histogram', 'quantile', 'Welford', 'StreamingStats']
+           'histogram', 'quantile', 'Welford', 'StreamingStats', 'RunningStats',
+           'StreamingHistogram']
 
 
 def _check_data(data, nan_policy):
@@ -211,10 +212,10 @@ StreamingStats = Welford
 
 class RunningStats:
     """Running mean and variance for every column of a table, one chunk at a time.
-    Attributes:
-        n_features: number of columns, None until the first non-empty chunk
-        count: int array, how many numbers were used for each column
-        mean: float array, NaN for a column that has no numbers yet
+
+    Params:
+        nan_policy: 'omit' (default) skips NaN separately in each column,
+                    'raise' throws ValueError if a chunk has NaN
     """
 
     def __init__(self, nan_policy='omit'):
@@ -265,6 +266,7 @@ class RunningStats:
         if self.n_features is not None and X.shape[1] != self.n_features:
             raise ValueError(f'chunk has {X.shape[1]} columns but earlier chunks had {self.n_features}')
 
+        # nothing can fail after this point, so start from zeros on the first chunk
         d = X.shape[1]
         if self.n_features is None:
             self.n_features = d
@@ -284,9 +286,7 @@ class RunningStats:
         self.count = total
         return self
 
-    update_stats = update
-
-    @property
+    update_stats = update         
     def mean(self):
         """Mean of each column, NaN where no number was seen yet."""
         return np.where(self.count > 0, self._mean, np.nan)
@@ -300,3 +300,85 @@ class RunningStats:
     def std(self, ddof=0):
         """Standard deviation of each column, same ddof rules as variance()."""
         return np.sqrt(self.variance(ddof))
+
+
+class StreamingHistogram:
+    """Histogram with fixed bins that is updated one chunk at a time, plus approximate quantiles.
+    
+    Params:
+        bins: int >= 1, number of equal-width bins, default 10
+        range: None or (low, high) with low < high, both finite
+    """
+
+    def __init__(self, bins=10, range=None):
+        if isinstance(bins, (bool, np.bool_)) or not isinstance(bins, (int, np.integer)) or bins < 1:
+            raise ValueError('bins must be a positive integer')
+        if range is not None:
+            r = np.asarray(range, dtype=float)
+            if r.shape != (2,) or not np.isfinite(r).all() or r[0] >= r[1]:
+                raise ValueError('range must be a finite (low, high) with low < high')
+        self.bins = int(bins)
+        self.range = range
+        self.reset()
+
+    def reset(self):
+        #Forget all counts
+        self.edges = None if self.range is None else np.linspace(self.range[0], self.range[1], self.bins + 1)
+        self.counts = np.zeros(self.bins, dtype=np.int64)
+        self.n_outside = 0
+        return self
+
+    def update(self, X_chunk):
+        """Add a chunk of numbers (any shape, it is flattened). Returns self so calls can be chained.
+
+        Raises:
+            TypeError: if X_chunk is not numeric
+            ValueError: if X_chunk contains inf
+            If a chunk is rejected, nothing is changed.
+        """
+        values = np.asarray(X_chunk)
+        if values.dtype.kind not in 'biuf':
+            raise TypeError('chunk must contain real numbers')
+        values = values.astype(float).ravel()
+        if np.isinf(values).any():
+            raise ValueError('chunk must not contain infinity')
+        values = values[~np.isnan(values)]
+        if values.size == 0:
+            return self                                    # nothing to count
+
+        if self.edges is None:                             # first chunk with numbers decides the range
+            low, high = values.min(), values.max()
+            if low == high:
+                low, high = low - 0.5, high + 0.5          # all the same value: make a range around it
+            self.edges = np.linspace(low, high, self.bins + 1)
+
+        counts, _ = np.histogram(values, bins=self.edges)  # the last bin includes its right edge
+        self.counts = self.counts + counts
+        self.n_outside += values.size - counts.sum()
+        return self
+
+    update_stats = update          # the name used in the assignment spec
+
+    def quantile(self, q):
+        """Approximate quantile(s) from the counts. q is a fraction in [0, 1], a number or a 1-D array.
+
+        It finds the bin where the running total passes q * total, then moves linearly inside
+        that bin, so the answer is off by less than one bin width. NaN if nothing was counted.
+        """
+        q = np.asarray(q, dtype=float)
+        if q.ndim > 1 or q.size == 0 or not np.all((q >= 0) & (q <= 1)):
+            raise ValueError('q must be a nonempty scalar or 1-D array in [0, 1]')
+        total = self.counts.sum()
+        if total == 0:
+            return np.full(q.shape, np.nan)
+
+        running = np.cumsum(self.counts)                   # values up to and including each bin
+        last = np.flatnonzero(self.counts)[-1]             # last bin that has values
+        target = q * total
+        i = np.minimum(np.searchsorted(running, target, side='right'), last)   # the bin holding the target
+        before = running[i] - self.counts[i]               # values in earlier bins
+        fraction = (target - before) / self.counts[i]      # how far through the bin
+        return self.edges[i] + fraction * (self.edges[i + 1] - self.edges[i])
+
+    def median(self):
+        return float(self.quantile(0.5))
